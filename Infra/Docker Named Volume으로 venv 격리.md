@@ -201,7 +201,7 @@ uv sync
 ## 관련 노트
 
 - [[2026-04-15 Docker vs Local venv 구조 차이 (uv sync 오류)]] — 본 패턴을 적용하게 된 원인 인시던트
-- [[FastAPI 파일 업로드와 Form 처리]] — 동일 프로젝트의 FastAPI 레이어
+- [[multipart 파일·폼 처리]] — 동일 프로젝트의 FastAPI 레이어
 
 ## 참고
 

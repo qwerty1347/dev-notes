@@ -259,7 +259,7 @@ if (empty($result['success'])) {
 
 ## 관련 노트
 
-- [[FastAPI 파일 업로드와 Form 처리]] — 다른 프레임워크에서 폼 제출 처리 참고
+- [[multipart 파일·폼 처리]] — 다른 프레임워크(FastAPI)에서 폼 제출 처리 참고
 - [[Docker Named Volume으로 venv 격리]]
 
 ## 참고
