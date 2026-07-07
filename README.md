@@ -29,20 +29,28 @@ updated: 2026-07-07
 ### Web
 - [[jsonable_encoder (JSON 직렬화)]] — Python 객체 → JSON 직렬화 유틸
 - [[Pydantic 검증 (model_validate)]] — 라우트 밖에서 dict/JSON 검증
+- [[Pydantic 완전 가이드]] — 모델 생성·검증·변환 종합 가이드
+- [[Annotated 의존성 주입 마이그레이션]] — `Depends`를 `Annotated`로 전환
+- [[Annotated 사용처 정리]] — `Annotated` 메타데이터 패턴 개관
+- [[FastAPI 파라미터 변수명 컨벤션]] — 경로/쿼리/바디 파라미터 네이밍
 - [[multipart 파일·폼 처리]] — 파일+폼 동시 요청, `Form()`·`as_form`
 - [[UploadFile vs bytes]] — 업로드 타입 선택
 - [[UploadFile 스트림 소비]] — `read()` 2회 호출 시 빈 바이트
 - [[uvicorn 로깅 초기화]] — 0.34→0.44 로그 누락, `force=True`/`dictConfig`
+- [[Tistory API 오류 해결 정리]] — 외부 Tistory API 연동 오류 모음
 
 ### Database
 - [[SQLAlchemy 쿼리 가이드 (Laravel 비교)]] — Eloquent ↔ SQLAlchemy 2.x (async/sync) 대응표
 - [[MongoDB 쿼리 가이드 (Beanie·Motor)]] — Eloquent ↔ Beanie/Motor 대응표
+- [[간단한 CRUD 예제 (라우터+Repository)]] — 라우터 + Repository 계층 CRUD
+- [[관계(조인) CRUD 예제]] — 2개 테이블 조인·다컬럼 CRUD
 
 ### Async
 - [[Celery vs arq]] — Redis 기반 큐 구성·사용법 비교
 
 ### Infra
 - [[Docker Named Volume으로 venv 격리]] — bind mount 환경에서 `.venv` 분리
+- [[Docker MySQL 비밀번호 미적용 문제]] — MySQL 컨테이너 env 비번이 안 먹을 때
 
 ### Security
 - [[Cloudflare Turnstile·hCaptcha 통합]] — 발급 → 프론트 삽입 → 서버 검증
