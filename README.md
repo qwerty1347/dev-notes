@@ -44,6 +44,7 @@ updated: 2026-07-07
 - [[MongoDB 쿼리 가이드 (Beanie·Motor)]] — Eloquent ↔ Beanie/Motor 대응표
 - [[간단한 CRUD 예제 (라우터+Repository)]] — 라우터 + Repository 계층 CRUD
 - [[관계(조인) CRUD 예제]] — 2개 테이블 조인·다컬럼 CRUD
+- [[Elasticsearch 쿼리 가이드 (auth_apikey)]] — 매핑·Query DSL·PHP 클라이언트 사용 정리
 
 ### Async
 - [[Celery vs arq]] — Redis 기반 큐 구성·사용법 비교
