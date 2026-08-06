@@ -59,6 +59,30 @@ keyword → "Hello World" 통째로 저장           → 정확히 "Hello World"
 }
 ```
 
+**⚠️ `keyword`의 대소문자 함정 — `normalizer`**
+
+`keyword`는 값을 통째로 저장하므로 `Abc@x.com` 과 `abc@x.com` 은 **서로 다른 값**입니다.
+이메일·apiKey처럼 대소문자를 무시하고 대조해야 하는 필드는 `normalizer`로 소문자화해서 색인합니다.
+
+```json
+{
+  "settings": {
+    "analysis": {
+      "normalizer": {
+        "lc": { "type": "custom", "filter": ["lowercase"] }
+      }
+    }
+  },
+  "mappings": {
+    "properties": {
+      "email": { "type": "keyword", "normalizer": "lc" }
+    }
+  }
+}
+```
+> `normalizer`는 색인할 때와 `term` 검색어에 **똑같이** 적용되므로, 대소문자 아무렇게나 넣어도 매칭됩니다.
+> (apiKey처럼 **대소문자를 구분해야 하는** 시크릿 값에는 쓰지 마세요.)
+
 #### ② 숫자 타입
 
 | 타입 | 범위 / 특징 |
@@ -144,6 +168,42 @@ ES는 **모든 필드가 기본적으로 배열을 허용**합니다. 타입은 
 - 필드 **추가**는 가능 (기존 필드 수정만 불가).
 - 검색에 쓰지 않는 필드는 `"index": false` 로 색인을 꺼서 용량·성능 절약 가능.
 
+**타입을 바꿔야 할 때 — alias + `_reindex` (무중단)**
+
+애플리케이션이 처음부터 **실제 인덱스가 아닌 alias를 바라보게** 해두면, 교체 시 코드 수정 없이 전환됩니다.
+
+```json
+// 0) 최초 생성 시부터 alias를 걸어둔다
+POST /_aliases
+{ "actions": [ { "add": { "index": "auth_apikey_v1", "alias": "auth_apikey_dev" } } ] }
+
+// 1) 새 매핑으로 v2 생성
+PUT /auth_apikey_v2
+{ "mappings": { "properties": { "ips": { "type": "ip" } } } }
+
+// 2) 데이터 복사 (건수 많으면 wait_for_completion=false 로 백그라운드)
+POST /_reindex
+{
+  "source": { "index": "auth_apikey_v1" },
+  "dest":   { "index": "auth_apikey_v2" }
+}
+
+// 3) alias를 v2로 원자적 교체 (remove + add 가 한 번에 적용됨 — 무중단)
+POST /_aliases
+{
+  "actions": [
+    { "remove": { "index": "auth_apikey_v1", "alias": "auth_apikey_dev" } },
+    { "add":    { "index": "auth_apikey_v2", "alias": "auth_apikey_dev" } }
+  ]
+}
+```
+
+> - `_reindex` 는 **매핑을 자동으로 안 만들어 줌.** 목적지 인덱스를 **먼저 새 매핑으로 생성**해야 함
+>   (안 그러면 동적 매핑으로 잡혀서 하려던 타입 변경이 무의미해짐).
+> - `_reindex` 중에도 원본에는 계속 쓰기가 들어올 수 있으므로, 복사 후 **누락분을 다시 한 번 반영**하거나
+>   `createdAt` 기준으로 증분 재복사할 것.
+> - 검증 후 구 인덱스 삭제. alias는 롤백 지점이기도 하므로 **바로 지우지 말고 며칠 두는 편이 안전**.
+
 ---
 
 ## 1. 검색 (SEARCH) — 특정 apiKey & ip 조건
@@ -210,24 +270,121 @@ public function searchDocument()
 | ES | SQL 대응 | 설명 |
 |----|----------|------|
 | `api_keys/_search` | `SELECT * FROM api_keys` | 인덱스에서 검색 |
-| `query` | `WHERE` | 검색 조건 |
-| `bool` | `WHERE A AND B` | 여러 조건 조합 |
-| `must` | `A AND B AND C` | 모든 조건 만족 (검색 점수 계산 O) |
+| `query` | `WHERE` (절 전체) | 검색 조건이 들어가는 **최상위 컨테이너. 조건 개수와 무관하게 항상 필요** |
+| `bool` | `WHERE A AND B` | 여러 조건을 AND/OR/NOT로 **조합**할 때 `query` 안에 넣는 절 |
+| `must` | `A AND B AND C` | 모든 조건 만족 (검색 점수 계산 O), 배열로 감싸야 함 |
 | `term` | `WHERE no = 1` | 하나의 정확한 값 비교 |
 | `terms` | `WHERE no IN (1,2,3)` | 찾을 값이 여러 개일 때 (IN) |
-| `filter` | — | 정확 일치만 필요할 때 (점수 계산 X, 캐싱 유리) |
+| `filter` | `WHERE` (AND) | 정확 일치만 필요할 때 (점수 계산 X, 캐싱 유리) |
+| `range` | `WHERE price BETWEEN 10000 AND 50000` | 숫자·날짜 등 범위 조건 (`gte`, `lte`, `gt`, `lt`) |
 
+> ⚠️ **`query`와 `bool`은 택일 관계가 아님** (자주 하는 오해).
+> `query`는 SQL의 `WHERE` 절 그 자체라 언제나 있어야 하고, 조건이 여러 개일 때 그 안에 `bool`을 넣는 구조.
+> ```
+> query               → WHERE 절 그 자체 (항상 필요)
+>  ├ term / match     → 조건 1개
+>  └ bool             → 조건 여러 개를 AND/OR/NOT로 조합
+>     ├ must / filter → AND
+>     ├ should        → OR
+>     └ must_not      → NOT
+> ```
 
-> bool 쿼리 안에는 의미 있는 절 최소 하나 있어야함 (must, should, filter, must_not)
+> bool 쿼리 안에는 의미 있는 절이 최소 하나 있어야 함 (must, should, filter, must_not)
 * must: AND
 * filter: WHERE (AND)
-* should: OR (다른필드의 OR, 같은 필드의 OR = temrs)
+* should: OR (다른 필드끼리의 OR. 같은 필드의 OR 은 `terms`)
 * must_not: NOT
+
+**예1) 조건 1개 — `bool` 없이 `query` 바로 아래**
+```json
+{
+  "from": 0,
+  "size": 1,
+  "track_total_hits": true,
+  "query": {
+    "term": {
+      "no": 54261872
+    }
+  },
+  "sort": [
+    { "no": { "order": "desc" } }
+  ]
+}
+```
+
+**예2) `object` 하위 필드 접근 — 점(`.`) 표기법**
+```json
+{
+  "from": 0,
+  "size": 1,
+  "track_total_hits": true,
+  "query": {
+    "term": {
+      "channel.dome": true
+    }
+  },
+  "sort": [
+    { "no": { "order": "desc" } }
+  ]
+}
+```
+
+> ⚠️ 위는 `object` 타입의 하위 필드를 점 표기법으로 찍는 것이지 **`nested` 접근이 아님**.
+> 필드가 `nested` 타입이면 `term`으로 바로 못 들어가고 `nested` 쿼리로 감싸야 함.
+> ```json
+> {
+>   "nested": {
+>     "path": "items",
+>     "query": {
+>       "bool": {
+>         "filter": [
+>           { "term": { "items.name": "A" } },
+>           { "term": { "items.qty": 2 } }
+>         ]
+>       }
+>     }
+>   }
+> }
+> ```
+
+**예3) 여러 조건 조합 — `query` 안에 `bool`**
+```json
+{
+  "from": 0,
+  "size": 1,
+  "track_total_hits": true,
+  "query": {
+    "bool": {
+      "must": [
+        { "term": { "no": 54261872 } }
+      ]
+    }
+  },
+  "sort": [
+    { "no": { "order": "desc" } }
+  ]
+}
+```
+
+| 파라미터 | 용도 |
+|----------|------|
+| `from` | 페이지네이션 시작 위치 |
+| `size` | 반환할 문서 개수 |
+| `track_total_hits` | `true`면 정확한 total 개수 반환 (기본은 10,000에서 멈춤) |
+
+> ⚠️ **JSON에 `//` 주석을 넣지 말 것.** Kibana Dev Tools는 관대하게 넘어가지만,
+> curl·PHP 클라이언트로 그대로 보내면 파싱 에러(400)가 남. 주석은 설명용으로만.
+
+> ⚠️ **`_id`로 정렬하지 말 것.** `sort: [{"_id": "desc"}]` 는 `_id` fielddata를 힙에 통째로 올려
+> 메모리를 크게 먹고 ES에서 비권장(deprecated)하는 경로임. 게다가 자동 생성 `_id`는 랜덤 문자열이라
+> **정렬해도 시간순이 아님**. 정렬은 `no` / `createdAt` 같은 전용 필드로,
+> 순서가 상관없는 전량 스캔이면 `"sort": ["_doc"]` 이 가장 빠름.
 
 > - apiKey·ips처럼 **정확히 일치하는 값만 조회**할 땐 `filter` 사용.
 > - 조건이 1개면 `bool > filter` 생략 가능.
-> - **결과도 필요** → `search()`의 `hits.total` 사용 (추천)
-> - **개수만 필요** → `count()` API 사용
+> - **문서 내용까지 필요** → `search()` (결과 + `hits.total` 을 한 번에 얻음)
+> - **개수만 필요** → `count()` API
+> - **존재 여부만 필요** → `search()` + `"size": 0` + `terminate_after: 1` (가장 가벼움)
 
 ### ⭐ term vs terms 차이 (자주 헷갈림)
 
@@ -283,6 +440,9 @@ ES는 배열 필드에서 "원소 중 하나라도 일치하면" 매칭시켜 �
 $response = $this->client->search([
     'index' => $this->authApiKeyIndex,
     'body'  => [
+        'size'             => 0,      // 문서 본문 불필요 — 존재 여부만 보면 됨
+        'terminate_after'  => 1,      // 1건 찾으면 즉시 중단
+        'track_total_hits' => false,  // 정확한 총계 불필요 (성능)
         'query' => [
             'bool' => [
                 'filter' => [
@@ -303,6 +463,37 @@ $response = $this->client->search([
 >   ```php
 >   $hit = $response['hits']['total']['value'] > 0;  // true 면 인증 통과
 >   ```
+> - ⚠️ `track_total_hits => false` 를 주면 `hits.total` 이 안 내려옴.
+>   위처럼 `total` 로 판단할 거면 이 옵션은 빼거나, `count($response['hits']['hits']) > 0` 로 판단할 것.
+
+**문서 내용도 함께 써야 한다면 `_source` 필터링으로 필요한 필드만**
+```php
+'size'    => 1,
+'_source' => ['id', 'apiKey'],   // 이 필드만 가져옴 (ips 배열 전체를 안 실어옴)
+```
+> 인증처럼 **초당 호출이 많은 지점**은 문서 전체를 실어오는 비용이 누적됨.
+> 존재 여부만 → `size: 0`, 일부 값만 필요 → `_source` 로 잘라 쓰기.
+
+### ⭐ match vs term (가장 흔한 사고)
+
+`term`은 **색인된 값과 글자 그대로** 비교합니다. 그래서 `text` 필드에 `term`을 쓰면 대부분 안 잡힙니다.
+
+```
+저장: "Hello World"   →  text 필드의 색인 결과: ["hello", "world"]
+
+{ "term":  { "title": "Hello World" } }          ✕ 색인에 그런 토큰이 없음
+{ "term":  { "title": "hello" } }                ✓ 토큰과 우연히 일치
+{ "match": { "title": "Hello World" } }          ✓ 검색어도 분석해서 비교
+{ "term":  { "title.keyword": "Hello World" } }  ✓ 멀티필드의 keyword 쪽
+```
+
+| 쿼리 | 검색어 분석 | 대상 필드 | 용도 |
+|------|-------------|-----------|------|
+| `term` / `terms` | **X** (입력 그대로) | `keyword`, 숫자, 날짜, `boolean` | 값 대조 (ID, 코드, 상태값) |
+| `match` | **O** (분석 후 비교) | `text` | 문장·단어 검색 |
+
+> 💡 **"검색 결과가 0건인데 데이터는 분명히 있다"** 면 십중팔구 `text` 필드에 `term`을 쓴 경우.
+> `apiKey`·`ips` 는 `keyword` 라서 `term` 이 맞음.
 
 ---
 
@@ -395,6 +586,63 @@ catch (ClientResponseException $e) {
 }
 ```
 
+> 💡 문서 `_id` 는 **최대 512바이트**. apiKey처럼 긴 값을 `_id` 로 쓸 땐 길이를 확인하고,
+> 값이 URL 경로에 그대로 노출된다는 점(로그·프록시에 남음)도 감안할 것.
+
+### cf) 대량 저장은 `bulk` — 한 번의 요청으로 처리
+
+문서를 하나씩 `index()` 로 넣으면 건당 HTTP 왕복이 발생해 건수가 늘수록 급격히 느려집니다.
+`bulk` 는 여러 작업을 한 요청에 모아 보냅니다.
+
+**REST DSL** (각 줄이 개행으로 구분된 NDJSON — 마지막 줄에도 개행 필요)
+```
+POST /_bulk
+{ "index":  { "_index": "auth_apikey_dev", "_id": "abc123" } }
+{ "id": 1, "apiKey": "abc123", "ips": ["127.0.0.1"] }
+{ "create": { "_index": "auth_apikey_dev", "_id": "def456" } }
+{ "id": 2, "apiKey": "def456", "ips": ["10.0.0.1"] }
+{ "delete": { "_index": "auth_apikey_dev", "_id": "ghi789" } }
+```
+
+**PHP 클라이언트**
+```php
+$params = ['body' => []];
+
+foreach ($rows as $row) {
+    $params['body'][] = ['index' => [
+        '_index' => 'auth_apikey_dev',
+        '_id'    => $row['apiKey'],
+    ]];
+    $params['body'][] = [                 // 바로 다음 줄이 본문
+        'id'     => $row['id'],
+        'apiKey' => $row['apiKey'],
+        'ips'    => $row['ips'],
+    ];
+}
+
+$response = $this->client->bulk($params)->asArray();
+```
+
+| 액션 | 동작 |
+|------|------|
+| `index` | 있으면 덮어쓰기, 없으면 생성 |
+| `create` | 이미 있으면 실패(409) — 중복 방지 |
+| `update` | 부분 수정 (`doc` 필요) |
+| `delete` | 삭제 (본문 줄 없음) |
+
+> ⚠️ **`bulk` 는 일부만 실패해도 HTTP 200을 반환**합니다. 예외로 안 잡히니 응답을 직접 확인해야 함:
+> ```php
+> if ($response['errors']) {
+>     foreach ($response['items'] as $item) {
+>         $op = array_key_first($item);
+>         if (isset($item[$op]['error'])) {
+>             // $item[$op]['error']['reason'] 로그
+>         }
+>     }
+> }
+> ```
+> 한 번에 보내는 양은 **5~15MB 또는 1,000~5,000건** 정도로 끊는 게 무난합니다.
+
 ---
 
 ## 4. 카운트 (COUNT)
@@ -402,6 +650,14 @@ catch (ClientResponseException $e) {
 **REST DSL**
 ```
 GET /auth_apikey_dev/_count
+```
+
+**조건부 카운트**
+```json
+GET /auth_apikey_dev/_count
+{
+  "query": { "term": { "apiKey": "abc123" } }
+}
 ```
 
 **응답**
@@ -412,7 +668,10 @@ GET /auth_apikey_dev/_count
 ]
 ```
 
-> **존재 여부만 판단**할 거면 `count`보다 `search` 사용.
+> **용도별 선택** (11장 존재 확인과 같은 기준)
+> - **문서 내용까지 필요** → `search()` — 결과와 `hits.total` 을 한 번에 얻으므로 `count` 를 따로 부를 필요 없음
+> - **정확한 전체 건수만 필요** → `count()`
+> - **존재 여부만 필요** → `search()` + `"size": 0` + `terminate_after: 1` (전량을 세지 않아 가장 가벼움)
 
 ---
 
@@ -519,6 +778,34 @@ public function deleteAllDocument()
 ]
 ```
 
+### cf) `_delete_by_query` 운영 옵션
+
+`_delete_by_query` 는 **스냅샷을 뜬 뒤 하나씩 지우는** 방식이라, 도중에 다른 요청이 같은 문서를 수정하면
+버전 충돌(`version_conflicts`)로 그 문서만 조용히 건너뜁니다. 건수가 많으면 요청이 타임아웃도 납니다.
+
+```
+POST /auth_apikey_dev/_delete_by_query?conflicts=proceed&wait_for_completion=false&refresh=true
+```
+
+| 옵션 | 의미 |
+|------|------|
+| `conflicts=proceed` | 버전 충돌이 나도 중단하지 않고 나머지를 계속 삭제 (기본은 중단) |
+| `wait_for_completion=false` | 즉시 `task` ID만 반환하고 백그라운드 실행 — **대량 삭제 시 필수** |
+| `refresh=true` | 삭제 완료 후 검색에 즉시 반영 |
+| `scroll_size` | 배치 크기 (기본 1000) |
+
+```php
+// 백그라운드 실행 후 진행상황 확인
+$task = $response['task'];                       // 예: "oTUltX4IQMOUUVeiohTt8A:124"
+$this->client->tasks()->get(['task_id' => $task]);
+```
+
+> 응답의 `version_conflicts` / `failures` 가 0이 아니면 **일부가 안 지워진 것**이므로 반드시 확인할 것.
+>
+> 💡 **인덱스를 통째로 비울 거면** `_delete_by_query` + `match_all` 보다
+> **인덱스를 삭제하고 매핑과 함께 다시 만드는 편이 훨씬 빠릅니다** (문서를 하나씩 지우지 않으므로).
+> 단, 이 경우 매핑·설정이 함께 날아가니 재생성 스크립트를 갖춰둘 것.
+
 ---
 
 ## 7. 페이지네이션 (Pagination)
@@ -544,6 +831,40 @@ $params = [
 | `from` | 시작 위치 `(pg - 1) * sz` |
 | `size` | 가져올 개수 |
 | `track_total_hits` | `true`면 전체 건수를 정확히 반환 (기본은 10,000에서 멈춤) |
+
+### ⚠️ 딥 페이징 한계 — `from + size ≤ 10,000`
+
+`from + size` 가 **10,000을 넘으면 요청 자체가 실패**합니다 (`index.max_result_window` 기본값).
+페이지 크기 10 기준 **1,000페이지가 한계**라, 운영에서 목록을 끝까지 넘기면 반드시 밟는 지점입니다.
+
+```
+Result window is too large, from + size must be less than or equal to: [10000]
+```
+
+원인은 성능입니다. `from: 100000` 은 각 샤드가 **10만 + size 건을 전부 정렬한 뒤 앞부분을 버리는** 방식이라
+페이지가 뒤로 갈수록 급격히 무거워집니다. `max_result_window` 를 올리는 건 임시방편일 뿐 권장되지 않습니다.
+
+**대안 ① `search_after`** — 마지막 문서의 정렬값을 커서로 넘겨 다음 페이지를 받음 (무한 스크롤·전량 추출용)
+
+```json
+{
+  "size": 10,
+  "sort": [
+    { "no": "desc" },
+    { "_shard_doc": "asc" }     // 동점 방지용 tie-breaker (필수)
+  ],
+  "search_after": [54261872, 0] // 직전 마지막 문서의 sort 값 그대로
+}
+```
+```php
+$last = end($response['hits']['hits']);
+$params['body']['search_after'] = $last['sort'];   // 다음 페이지 요청에 그대로 전달
+```
+
+> - `search_after` 는 **임의 페이지 점프가 불가**(순차 이동만). 대신 깊이와 무관하게 일정한 속도.
+> - 정렬 기준이 유니크하지 않으면 페이지 경계에서 문서가 누락·중복되므로 **tie-breaker를 반드시** 넣을 것.
+
+**대안 ② 전량 추출은 `_pit`(Point In Time) + `search_after`** — 스냅샷을 고정해 페이징 중 데이터가 변해도 일관성 유지. (구버전의 `scroll` 대체)
 
 ---
 
@@ -626,7 +947,7 @@ ex)
 
 | 상품명 | status | price |
 |--------| -------| ------|
-| 아이폰 16 Pr | OPEN | 1,500,000 |
+| 아이폰 16 Pro | OPEN | 1,500,000 |
 | 아이폰 케이스 | OPEN | 20,000 |
 | 아이폰 15 | SOLDOUT | 1,200,000 |
 
@@ -722,6 +1043,24 @@ $exists = $this->client->exists([
 
 > 조건(apiKey 등)으로 존재만 확인할 땐 `search` + `"size": 0` + `terminate_after: 1` 로 가볍게 조회하거나 `count` 사용.
 
+### ⚠️ 이름이 비슷한 둘 — `exists()` API vs `exists` 쿼리
+
+| 구분 | 확인 대상 | 예시 |
+|------|-----------|------|
+| `exists()` **API** | **문서**가 있는지 (`_id` 기준) | 위 PHP 코드 |
+| `exists` **쿼리** | 문서 안에 **필드에 값이 있는지** | 아래 |
+
+```json
+// ips 필드에 값이 있는 문서만 (null, [] 는 제외됨)
+{ "query": { "bool": { "filter": [ { "exists": { "field": "ips" } } ] } } }
+
+// 반대로 ips 가 비어 있는 문서 찾기 (must_not)
+{ "query": { "bool": { "must_not": [ { "exists": { "field": "ips" } } ] } } }
+```
+
+> ES에는 SQL의 `IS NULL` 이 없습니다. `null` / `[]` / 필드 자체가 없음이 전부 **"값 없음"** 으로 동일 취급되며,
+> `must_not` + `exists` 가 `IS NULL` 대응입니다.
+
 ---
 
 ## 12. 클라이언트 초기화 (PHP 연결 설정)
@@ -738,6 +1077,33 @@ $this->client = ClientBuilder::create()
 
 > 라이브러리: `elasticsearch/elasticsearch` (공식 PHP 클라이언트).
 > `composer require elasticsearch/elasticsearch`
+
+### cf) ES 7.x 코드와 다른 점 (8.x 기준)
+
+7.x 예제를 복붙하면 바로 막히는 지점들입니다.
+
+| 항목 | 7.x | 8.x (이 문서) |
+|------|-----|---------------|
+| 응답 타입 | `array` (바로 `$r['hits']`) | `Elasticsearch` 객체 → **`asArray()` / `asBool()` / `asString()` 필요** |
+| 네임스페이스 | `Elasticsearch\` | `Elastic\Elasticsearch\` |
+| 매핑 타입 | `_doc` 등 type 개념 잔존 | **완전 제거** (`PUT idx/_doc/1` 만) |
+| 기본 통신 | http | **https + 보안 기본 활성화** (로컬 개발 시 인증서 설정 필요) |
+
+```php
+// 8.x 에서 응답을 배열처럼 바로 쓰면 에러
+$response = $this->client->search([...]);
+$total = $response['hits']['total']['value'];   // ArrayAccess 로 동작은 하지만
+$result = $response->asArray();                 // 배열로 변환해 쓰는 쪽이 명확
+```
+
+> 자체 서명 인증서를 쓰는 개발 서버라면:
+> ```php
+> ClientBuilder::create()
+>     ->setHosts(['https://localhost:9200'])
+>     ->setBasicAuthentication('elastic', $password)
+>     ->setCABundle('/path/to/http_ca.crt')   // 또는 ->setSSLVerification(false) — 개발 전용
+>     ->build();
+> ```
 
 ---
 
@@ -777,16 +1143,452 @@ try {
 | 409 | 충돌 | `op_type => create` 중복 저장 |
 
 ---
+---
+
+# 📊 집계 (Aggregation)
+
+> ### 여기부터는 **"찾기"가 아니라 "세고 · 묶고 · 계산하기"**
+> SQL의 `GROUP BY` + 집계함수(`COUNT`, `SUM`, `AVG`…)에 해당하는 영역.
+> 검색(`query`)이 **"어떤 문서를 볼까"** 라면, 집계(`aggs`)는 **"그 문서들로 무엇을 계산할까"** 입니다.
+
+```
+                  ┌── query ──→ 조건에 맞는 문서 집합을 고름
+검색 요청 ─────────┤
+                  └── aggs  ──→ 그 집합을 대상으로 묶고 계산  ← 여기
+```
+
+---
+
+## 15. 집계 기본 구조 — `size: 0` + `aggs`
+
+**REST DSL** — 상태값별 문서 개수 세기 (`GROUP BY status`)
+```json
+GET products/_search
+{
+  "size": 0,                       // ← 문서 본문은 필요 없음 (집계 결과만)
+  "aggs": {
+    "by_status": {                 // ← 집계 이름 (내가 정함, 응답 키가 됨)
+      "terms": { "field": "status" }
+    }
+  }
+}
+```
+
+**응답**
+```json
+{
+  "hits": { "total": { "value": 120 }, "hits": [] },   // size:0 이라 비어 있음
+  "aggregations": {
+    "by_status": {
+      "doc_count_error_upper_bound": 0,
+      "sum_other_doc_count": 0,
+      "buckets": [
+        { "key": "OPEN",    "doc_count": 95 },
+        { "key": "SOLDOUT", "doc_count": 25 }
+      ]
+    }
+  }
+}
+```
+
+**PHP 클라이언트**
+```php
+$response = $this->client->search([
+    'index' => 'products',
+    'body'  => [
+        'size' => 0,
+        'aggs' => [
+            'by_status' => [
+                'terms' => ['field' => 'status']
+            ]
+        ]
+    ]
+])->asArray();
+
+foreach ($response['aggregations']['by_status']['buckets'] as $b) {
+    echo "{$b['key']} : {$b['doc_count']}건\n";   // OPEN : 95건
+}
+```
+
+> ⚠️ **`size: 0` 을 빠뜨리면** 쓰지도 않을 문서 10건을 매번 같이 실어옵니다. 집계만 필요하면 항상 `size: 0`.
+> `aggs` 는 `aggregations` 의 축약형이며 둘 다 동작합니다.
+
+### 집계의 3가지 종류
+
+| 종류 | 하는 일 | 결과 | 대표 |
+|------|---------|------|------|
+| **Metric** | 숫자 하나로 **계산** | 값 | `sum`, `avg`, `cardinality` |
+| **Bucket** | 조건별로 **묶음(그룹)** 생성 | 버킷 목록 | `terms`, `range`, `date_histogram` |
+| **Pipeline** | 다른 집계의 **결과를 다시 가공** | 값/필터 | `bucket_selector`, `cumulative_sum` |
+
+> 실무의 대부분은 **Bucket 으로 묶고 → 그 안에 Metric 을 넣는** 조합입니다 (→ 18장).
+
+---
+
+## 16. Metric 집계 — 숫자 계산
+
+```json
+{
+  "size": 0,
+  "aggs": {
+    "total_price": { "sum":         { "field": "price" } },
+    "avg_price":   { "avg":         { "field": "price" } },
+    "max_price":   { "max":         { "field": "price" } },
+    "ip_count":    { "value_count": { "field": "ips" } },
+    "uniq_ip":     { "cardinality": { "field": "ips" } },
+    "price_stats": { "stats":       { "field": "price" } }
+  }
+}
+```
+
+| 집계 | SQL 대응 | 설명 |
+|------|----------|------|
+| `sum` / `avg` / `min` / `max` | `SUM()` / `AVG()` / … | 숫자 필드 계산 |
+| `value_count` | `COUNT(field)` | **값의 개수** (배열이면 원소를 각각 셈) |
+| `cardinality` | `COUNT(DISTINCT field)` | **고유값 개수** — ⚠️ **근사치** |
+| `stats` | 한 번에 5종 | `count`, `min`, `max`, `avg`, `sum` 을 한 번에 |
+| `extended_stats` | + 분산·표준편차 | `stats` + `variance`, `std_deviation` |
+| `percentiles` | 백분위 | 응답시간 p95, p99 등 — ⚠️ 근사치 |
+| `top_hits` | 그룹별 대표 행 | 버킷 안에서 상위 N개 **문서 원본**을 꺼냄 |
+
+**응답 형태 — Metric 은 `buckets` 가 없고 `value` 하나**
+```json
+"aggregations": {
+  "uniq_ip":     { "value": 37 },
+  "total_price": { "value": 18500000 },
+  "price_stats": { "count": 120, "min": 1000, "max": 1500000, "avg": 154166.6, "sum": 18500000 }
+}
+```
+```php
+$uniq = $response['aggregations']['uniq_ip']['value'];   // 37
+```
+
+> ⚠️ **`cardinality` 는 정확한 값이 아닙니다.** HyperLogLog++ 알고리즘으로 메모리를 아끼는 대신 오차를 허용합니다.
+> `precision_threshold`(기본 3000, 최대 40000) **이하 범위에서는 거의 정확**하고, 그 이상부터 오차가 생깁니다.
+> ```json
+> "uniq_ip": { "cardinality": { "field": "ips", "precision_threshold": 10000 } }
+> ```
+> **정산·과금처럼 정확한 distinct 가 필요하면** `composite` 집계로 전량을 훑거나 RDB에서 계산하세요.
+
+---
+
+## 17. Bucket 집계 — 그룹으로 묶기
+
+### ① `terms` — 값별로 묶기 (가장 많이 씀)
+
+```json
+"by_status": {
+  "terms": {
+    "field": "status",
+    "size": 20,                        // 상위 몇 개 버킷까지 (기본 10)
+    "order": { "_count": "desc" }      // 정렬 기준
+  }
+}
+```
+
+| `order` | 의미 |
+|---------|------|
+| `{ "_count": "desc" }` | 건수 많은 순 (기본) |
+| `{ "_key": "asc" }` | 값 이름순 |
+| `{ "avg_price": "desc" }` | **하위 집계 결과 기준** 정렬 (→ 18장) |
+
+### ② `range` / `histogram` — 숫자 구간으로 묶기
+
+```json
+"by_price": {
+  "range": {
+    "field": "price",
+    "ranges": [
+      { "to": 10000 },                        // ~ 10,000 미만
+      { "from": 10000, "to": 100000 },        // 10,000 이상 ~ 100,000 미만
+      { "from": 100000 }                      // 100,000 이상
+    ]
+  }
+}
+```
+```json
+"by_price_step": {
+  "histogram": { "field": "price", "interval": 50000 }   // 5만원 단위로 자동 구간
+}
+```
+> `from` 은 **이상(포함)**, `to` 는 **미만(제외)** 입니다.
+
+### ③ `date_histogram` — 날짜 단위로 묶기
+
+```json
+"daily": {
+  "date_histogram": {
+    "field": "createdAt",
+    "calendar_interval": "1d",
+    "time_zone": "+09:00",              // ⚠️ 한국은 필수 (아래 함정 참고)
+    "format": "yyyy-MM-dd",
+    "min_doc_count": 0,                 // 0건인 날도 버킷으로 출력
+    "extended_bounds": {                // 데이터가 없는 앞뒤 구간까지 채움
+      "min": "2026-08-01", "max": "2026-08-31"
+    }
+  }
+}
+```
+
+| 옵션 | 설명 |
+|------|------|
+| `calendar_interval` | `1m`, `1h`, `1d`, `1w`, `1M`, `1q`, `1y` — **달력 기준** (월의 길이 다름 반영) |
+| `fixed_interval` | `30s`, `90m`, `24h` — **고정 길이** (달력 무시) |
+| `min_doc_count: 0` | 데이터 없는 구간도 0으로 출력 (그래프용) |
+
+### ④ `filters` — 내가 정의한 조건별로 묶기
+
+`terms` 로 안 나뉘는 임의 조건을 그룹으로 만들 때 씁니다.
+
+```json
+"by_segment": {
+  "filters": {
+    "filters": {
+      "고가":  { "range": { "price": { "gte": 1000000 } } },
+      "품절":  { "term":  { "status": "SOLDOUT" } }
+    }
+  }
+}
+```
+
+### ⑤ `nested` — 배열 객체 안을 집계
+
+`nested` 타입 필드는 **`nested` 집계로 감싸야** 안이 보입니다 (0장의 `object` vs `nested` 와 같은 이유).
+
+```json
+"items_agg": {
+  "nested": { "path": "items" },
+  "aggs": {
+    "by_name": { "terms": { "field": "items.name" } }
+  }
+}
+```
+
+---
+
+## 18. 집계 중첩 & `query` 와의 조합
+
+### 중첩 — Bucket 안에 Metric (실무의 90%)
+
+**"상태별 건수 + 상태별 평균가 + 상태별 고유 IP 수"**
+
+```json
+GET products/_search
+{
+  "size": 0,
+  "query": {                                   // ← 집계 대상 문서를 먼저 좁힘
+    "bool": { "filter": [ { "range": { "createdAt": { "gte": "2026-08-01" } } } ] }
+  },
+  "aggs": {
+    "by_status": {
+      "terms": { "field": "status", "size": 10, "order": { "avg_price": "desc" } },
+      "aggs": {                                // ← 각 버킷 안에서 다시 계산
+        "avg_price": { "avg":         { "field": "price" } },
+        "uniq_ip":   { "cardinality": { "field": "clientIp" } }
+      }
+    }
+  }
+}
+```
+
+**응답**
+```json
+"by_status": {
+  "buckets": [
+    { "key": "OPEN",    "doc_count": 95, "avg_price": { "value": 180000 }, "uniq_ip": { "value": 31 } },
+    { "key": "SOLDOUT", "doc_count": 25, "avg_price": { "value": 120000 }, "uniq_ip": { "value": 12 } }
+  ]
+}
+```
+```php
+foreach ($response['aggregations']['by_status']['buckets'] as $b) {
+    printf("%s: %d건, 평균 %s원, 고유IP %d\n",
+        $b['key'], $b['doc_count'], number_format($b['avg_price']['value']), $b['uniq_ip']['value']);
+}
+```
+
+> ⭐ **`query` 는 집계에도 그대로 적용됩니다.** 위 예시의 집계는 "8월 1일 이후 문서"만 대상으로 계산됩니다.
+> SQL 로 치면 `WHERE createdAt >= '2026-08-01' GROUP BY status`.
+
+### `HAVING` 이 필요하면 — `bucket_selector` (Pipeline)
+
+버킷을 만든 **뒤에** 건수·합계로 버킷 자체를 걸러냅니다.
+
+```json
+"by_apikey": {
+  "terms": { "field": "apiKey", "size": 100 },
+  "aggs": {
+    "call_count": { "value_count": { "field": "apiKey" } },
+    "over_1000": {
+      "bucket_selector": {
+        "buckets_path": { "cnt": "call_count" },
+        "script": "params.cnt > 1000"          // HAVING COUNT(*) > 1000
+      }
+    }
+  }
+}
+```
+
+---
+
+## 19. ⚠️ 집계 함정 (여기서 대부분 틀림)
+
+**① `text` 필드는 집계 불가**
+```
+Fielddata is disabled on text fields by default. Set fielddata=true ... or use a keyword field instead
+```
+→ `fielddata: true` 를 켜지 말고 **`.keyword` 멀티필드로 집계**하세요 (fielddata 는 힙을 크게 먹습니다).
+```json
+"terms": { "field": "title.keyword" }
+```
+
+**② `terms` 는 기본 상위 10개만 나옵니다**
+전체가 다 나온 줄 알고 합계를 내면 틀립니다. 응답의 `sum_other_doc_count` 가 **버킷에 안 담긴 나머지 건수**입니다.
+```json
+"sum_other_doc_count": 4821    // ← 0이 아니면 잘린 것
+```
+→ `size` 를 올리거나, 전량이 필요하면 `composite` 집계로 페이징하세요.
+
+**③ `terms` 의 `doc_count` 는 샤드 근사치일 수 있음**
+각 샤드가 자기 상위 N개만 올려보내므로, 샤드가 여러 개면 순위·건수가 어긋날 수 있습니다.
+`doc_count_error_upper_bound` 가 **오차 상한**입니다. 0이면 정확.
+→ `shard_size` 를 `size` 보다 크게 주면 완화됩니다 (`"shard_size": 1000`).
+
+**④ `cardinality` / `percentiles` 는 근사치** (→ 16장)
+
+**⑤ `date_histogram` 의 `time_zone` 미지정 = 날짜가 밀림**
+ES 내부는 **UTC 기준**이라, 한국 시간 `2026-08-06 08:00` 은 UTC 로 `2026-08-05 23:00` 입니다.
+`time_zone` 을 안 주면 **오전 9시 이전 데이터가 전날 버킷에 들어갑니다.**
+```json
+"time_zone": "+09:00"      // 일별·월별 집계에는 사실상 필수
+```
+
+**⑥ 버킷 수 폭발**
+`terms` 의 `size` 를 크게 주거나 중첩을 깊게 하면 `search.max_buckets`(기본 65,536) 초과로 실패합니다.
+```
+Trying to create too many buckets. Must be less than or equal to: [65536]
+```
+→ 설정을 올리기 전에 **집계 범위를 `query` 로 먼저 좁히세요.**
+
+**⑦ 집계는 검색보다 훨씬 무겁습니다**
+전체 문서를 훑어 계산하므로, **`query` 로 대상을 좁히고 `size: 0`** 을 주는 것이 기본입니다.
+실시간 화면에서 매번 돌릴 값이면 결과를 캐싱하거나 별도 집계 인덱스를 두는 편이 낫습니다.
+
+---
+
+## 20. SQL ↔ 집계 대응표 & 실전 예시
+
+| SQL | Elasticsearch |
+|-----|---------------|
+| `GROUP BY status` | `terms` agg |
+| `COUNT(*)` | 버킷의 `doc_count` |
+| `COUNT(DISTINCT ip)` | `cardinality` (근사) |
+| `SUM/AVG/MIN/MAX(price)` | `sum` / `avg` / `min` / `max` agg |
+| `WHERE ... GROUP BY ...` | `query` + `aggs` |
+| `HAVING COUNT(*) > 1000` | `bucket_selector` |
+| `ORDER BY cnt DESC LIMIT 10` | `terms` 의 `order` + `size` |
+| `GROUP BY DATE(createdAt)` | `date_histogram` (+ `time_zone`) |
+| `GROUP BY CASE WHEN ...` | `range` / `filters` agg |
+
+### 실전 ① apiKey 인덱스 — 등록 현황 한눈에 보기
+
+```php
+$response = $this->client->search([
+    'index' => $this->authApiKeyIndex,
+    'body'  => [
+        'size' => 0,
+        'aggs' => [
+            'uniq_ip'    => ['cardinality' => ['field' => 'ips']],       // 등록된 고유 IP 수
+            'ip_total'   => ['value_count' => ['field' => 'ips']],       // 총 IP 등록 건수
+            'top_ip'     => ['terms' => ['field' => 'ips', 'size' => 10]], // 많이 쓰인 IP TOP 10
+        ]
+    ]
+])->asArray();
+
+$agg = $response['aggregations'];
+echo "고유 IP: {$agg['uniq_ip']['value']} / 총 등록: {$agg['ip_total']['value']}\n";
+```
+
+> `ips` 는 배열 필드지만 집계에서는 **원소 하나하나가 개별 값으로 계산**됩니다.
+> 그래서 `top_ip` 버킷의 `doc_count` 는 "그 IP를 등록한 apiKey 문서 수"가 됩니다.
+
+### 실전 ② 중복 IP 사용 apiKey 찾기 (`HAVING`)
+
+```json
+{
+  "size": 0,
+  "aggs": {
+    "by_ip": {
+      "terms": { "field": "ips", "size": 1000 },
+      "aggs": {
+        "dup_only": {
+          "bucket_selector": {
+            "buckets_path": { "cnt": "_count" },
+            "script": "params.cnt > 1"        // 2개 이상 apiKey가 쓰는 IP만
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### 실전 ③ 일자별 등록 추이 (그래프용)
+
+```json
+{
+  "size": 0,
+  "query": { "range": { "createdAt": { "gte": "now-30d/d" } } },
+  "aggs": {
+    "daily": {
+      "date_histogram": {
+        "field": "createdAt",
+        "calendar_interval": "1d",
+        "time_zone": "+09:00",
+        "format": "yyyy-MM-dd",
+        "min_doc_count": 0
+      }
+    }
+  }
+}
+```
+```php
+foreach ($response['aggregations']['daily']['buckets'] as $b) {
+    // key_as_string 이 format 적용된 사람이 읽을 수 있는 값
+    echo "{$b['key_as_string']} : {$b['doc_count']}\n";   // 2026-08-06 : 12
+}
+```
+
+> 버킷 응답의 `key` 는 **epoch milliseconds**, `key_as_string` 이 `format` 이 적용된 문자열입니다.
+
+---
 
 ## 핵심 요약
 
-- **완전 일치 검색이 필요한 필드는 `keyword`** 로 매핑 (`text` ✕).
+- **완전 일치 검색이 필요한 필드는 `keyword`** 로 매핑 (`text` ✕). 대소문자 무시가 필요하면 `normalizer`.
+- **`query`는 항상 필요한 `WHERE` 절 자체**, 조건이 여러 개일 때 그 안에 `bool`을 넣는 구조 (택일 아님).
 - 정확 일치·다건 조회는 `term` / `terms` + `filter` 조합.
-- **중복 방지**: `id`를 유니크 값으로 지정 + `op_type => 'create'` (중복 시 409).
+  **`text` 필드에 `term`을 쓰면 안 잡힘** → `match` 또는 `.keyword` 사용.
+- **중복 방지**: **문서 `_id`** 를 유니크 값(apiKey)으로 지정 + `op_type => 'create'` (중복 시 409).
+- **대량 저장은 `bulk`** — 단, 일부 실패해도 200이 오므로 `$response['errors']` 를 반드시 확인.
 - **NRT 주의**: 저장/삭제 직후 즉시 반영이 필요하면 `refresh => true`.
-- 전체 삭제는 인덱스를 지우지 않고 `_delete_by_query` + `match_all`.
+- 전체 삭제는 인덱스를 지우지 않고 `_delete_by_query` + `match_all`
+  (대량이면 `conflicts=proceed` + `wait_for_completion=false`).
 - 페이지네이션은 `from`/`size`, 전체 건수는 `track_total_hits => true`.
+  **`from + size ≤ 10,000` 한계**가 있으니 그 이상은 `search_after`.
 - **수정**: `index()`는 전체 교체, 일부만 바꾸려면 `update()` + `doc`; 있으면수정/없으면생성은 `doc_as_upsert`.
 - **bool 절**: 점수 필요 없으면 `filter`(빠름·캐싱), 가점은 `should`, 제외는 `must_not`.
 - **refresh**: 즉시성 필요하면 `true`/`'wait_for'`, 평소엔 `false`(기본)로 성능 확보.
-- **정렬은 `keyword`/숫자/날짜** 필드로 (text 불가), 존재 확인은 `exists()`.
+- **정렬은 `no`/`createdAt` 같은 `keyword`·숫자·날짜 필드로** (`text` 불가, **`_id` 정렬은 금지**).
+- **존재 확인**: 문서 단위는 `exists()` API, 필드 값 유무는 `exists` 쿼리 (`IS NULL` = `must_not` + `exists`).
+- **타입 변경은 불가** → alias + 새 인덱스 + `_reindex` 로 무중단 교체.
+
+**📊 집계**
+
+- **집계는 `size: 0` + `aggs`**, `query` 로 대상을 좁힌 뒤 계산 (`WHERE` + `GROUP BY`).
+- **Bucket(`terms`·`date_histogram`)으로 묶고 그 안에 Metric(`avg`·`cardinality`)을 중첩**하는 게 기본형.
+- **`text` 필드는 집계 불가** → `.keyword` 로 (`fielddata: true` 는 켜지 말 것).
+- **`terms` 는 기본 상위 10개만** → `sum_other_doc_count` 가 0이 아니면 잘린 것. 전량은 `composite`.
+- **`cardinality`·`percentiles` 는 근사치**, `terms` 의 `doc_count` 도 샤드 오차 가능(`doc_count_error_upper_bound`).
+- **`date_histogram` 에 `time_zone: "+09:00"` 필수** — 없으면 UTC 기준이라 오전 9시 이전이 전날로 밀림.
+- `HAVING` 은 `bucket_selector`, 버킷 응답의 날짜는 `key`(epoch) 말고 **`key_as_string`** 을 쓸 것.
