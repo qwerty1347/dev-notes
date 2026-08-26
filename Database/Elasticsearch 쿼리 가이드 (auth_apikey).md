@@ -89,7 +89,7 @@ text    → ["hello", "world"] 로 쪼개서 저장   → "hello" 로 검색됨,
 keyword → "Hello World" 통째로 저장           → 정확히 "Hello World" 여야 매칭 ✓ (대소문자도 구분)
 ```
 
-```sql (실예제)
+```sql (예제)
 -- MySQL 로 치면
 SELECT * FROM posts WHERE title = 'Hello World';                 -- keyword + term
 SELECT * FROM posts WHERE MATCH(title) AGAINST('Hello World');   -- text + match
@@ -389,7 +389,7 @@ public function searchDocument()
   }
 }
 ```
-```sql (실예제)
+```sql (예제)
 -- MySQL 로는 그냥 이것
 WHERE api_key = 'abc123' AND ip = '192.168.0.2'
 ```
@@ -427,7 +427,7 @@ WHERE api_key = 'abc123' AND ip = '192.168.0.2'
   }
 }
 ```
-```sql (실예제)
+```sql (예제)
 SELECT * FROM products
 WHERE status = 'OPEN'                              -- filter[0]
   AND price >= 100000                              -- filter[1]
@@ -439,7 +439,7 @@ WHERE status = 'OPEN'                              -- filter[0]
 `should` 는 **혼자 쓰일 때만** "최소 1개 만족" 이 기본입니다.
 `filter` 나 `must` 와 **같이 쓰면 `should` 는 그냥 가점 조건으로 바뀝니다.**
 
-```sql (실예제)
+```sql (예제)
 -- minimum_should_match 를 안 주면 이렇게 동작함
 SELECT * FROM products
 WHERE status = 'OPEN' AND price >= 100000          -- ← 이 조건만 걸림
@@ -477,7 +477,7 @@ ORDER BY (brand IN ('apple','samsung')) DESC;      -- ← should 는 정렬 가�
   }
 }
 ```
-```sql (실예제)
+```sql (예제)
 SELECT * FROM products
 WHERE status = 'OPEN'                          -- filter
   AND (brand = 'apple' OR price < 10000)       -- should + minimum_should_match: 1
@@ -503,7 +503,7 @@ WHERE status = 'OPEN'                          -- filter
   ]
 }
 ```
-```sql (실예제)
+```sql (예제)
 -- MySQL 대응
 SELECT * FROM api_keys
 WHERE no = 54261872        -- query > term
@@ -529,7 +529,7 @@ SELECT COUNT(*) FROM api_keys WHERE no = 54261872;   -- track_total_hits: true �
   ]
 }
 ```
-```sql (실예제)
+```sql (예제)
 -- MySQL 대응 (JSON 컬럼의 하위 키를 찍는 것과 같음)
 SELECT * FROM api_keys WHERE channel->>'$.dome' = 'true' ORDER BY no DESC LIMIT 1;
 ```
@@ -607,7 +607,7 @@ SELECT * FROM api_keys WHERE channel->>'$.dome' = 'true' ORDER BY no DESC LIMIT 
 ```json
 { "term": { "apiKey": "abc123" } }
 ```
-```sql (실예제)
+```sql (예제)
 SELECT * FROM api_keys WHERE api_key = 'abc123';
 ```
 
@@ -615,7 +615,7 @@ SELECT * FROM api_keys WHERE api_key = 'abc123';
 ```json
 { "terms": { "id": [1, 2, 3] } }
 ```
-```sql (실예제)
+```sql (예제)
 SELECT * FROM api_keys WHERE id IN (1, 2, 3);
 ```
 
@@ -649,7 +649,7 @@ ES는 배열 필드에서 "원소 중 하나라도 일치하면" 매칭시켜 �
 **"이 apiKey가 존재하고, 등록된 ips 목록 안에 요청 IP가 들어있는 문서"** 를 찾는 인증용 쿼리.
 
 **MySQL 로 먼저 보면**
-```sql (실예제)
+```sql (예제)
 SELECT EXISTS (
   SELECT 1 FROM api_keys
   WHERE api_key = ?   -- $request->bearerToken()
@@ -737,7 +737,7 @@ GET api_keys/_search
 ```
 
 **MySQL 대응**
-```sql (실예제)
+```sql (예제)
 SELECT * FROM api_keys LIMIT 100;    -- match_all = WHERE 절 없음
 ```
 > ⚠️ ES 는 `size` 를 안 주면 **기본 10건만** 나옵니다 (MySQL 이 `LIMIT` 없으면 전부 나오는 것과 반대).
@@ -771,7 +771,7 @@ POST api_keys/_doc
 ```
 
 **MySQL 대응**
-```sql (실예제)
+```sql (예제)
 INSERT INTO api_keys (api_key, ips) VALUES ('abc123', '...');
 ```
 > `POST .../_doc` 은 `_id` 를 ES 가 자동 생성 → MySQL 의 `AUTO_INCREMENT` PK 와 같은 자리.
@@ -914,7 +914,7 @@ GET /auth_apikey_dev/_count
 ```
 
 **MySQL 대응**
-```sql (실예제)
+```sql (예제)
 SELECT COUNT(*) FROM auth_apikey;                          -- GET /_count
 SELECT COUNT(*) FROM auth_apikey WHERE api_key = 'abc123'; -- 조건부 count
 ```
@@ -945,7 +945,7 @@ POST /api_keys/_delete_by_query
 ```
 
 **MySQL 대응**
-```sql (실예제)
+```sql (예제)
 DELETE FROM api_keys WHERE api_key = 'abc123';   -- _delete_by_query (조건 삭제)
 DELETE FROM api_keys WHERE id = 1;               -- delete by _id     (PK 삭제)
 ```
@@ -1028,7 +1028,7 @@ POST /auth_apikey_dev/_delete_by_query
 ```
 
 **MySQL 대응**
-```sql (실예제)
+```sql (예제)
 DELETE FROM auth_apikey;      -- _delete_by_query + match_all (한 행씩 지움, 느림)
 TRUNCATE TABLE auth_apikey;   -- 인덱스 삭제 후 재생성 (훨씬 빠름) ← 아래 💡 와 같은 이야기
 ```
@@ -1111,7 +1111,7 @@ $params = [
 ```
 
 **MySQL 대응**
-```sql (실예제)
+```sql (예제)
 -- pg=3, sz=10 이면
 SELECT * FROM api_keys
 WHERE no IN (?, ?, ?)          -- terms
@@ -1140,7 +1140,7 @@ Result window is too large, from + size must be less than or equal to: [10000]
 페이지가 뒤로 갈수록 급격히 무거워집니다. `max_result_window` 를 올리는 건 임시방편일 뿐 권장되지 않습니다.
 
 > **MySQL 에서도 똑같이 겪는 문제입니다.**
-> ```sql (실예제)
+> ```sql (예제)
 > SELECT * FROM api_keys ORDER BY no DESC LIMIT 10 OFFSET 100000;
 > -- → 10만 건을 정렬해서 읽고 버린 뒤 10건만 반환 (페이지가 뒤로 갈수록 느려짐)
 > ```
@@ -1164,7 +1164,7 @@ $params['body']['search_after'] = $last['sort'];   // 다음 페이지 요청에
 ```
 
 **MySQL 대응 — 키셋(keyset) 페이지네이션과 완전히 같은 기법**
-```sql (실예제)
+```sql (예제)
 -- 1페이지
 SELECT * FROM api_keys ORDER BY no DESC LIMIT 10;
 
@@ -1208,7 +1208,7 @@ POST /auth_apikey_dev/_update/Y-GLWp8BE3j6GTNTj69k
 ```
 
 **MySQL 대응**
-```sql (실예제)
+```sql (예제)
 -- update() + doc  = 지정한 컬럼만 수정
 UPDATE auth_apikey SET ips = ? WHERE id = ?;
 
@@ -1244,7 +1244,7 @@ $response = $this->client->update([
 ```
 
 **MySQL 대응 — upsert**
-```sql (실예제)
+```sql (예제)
 INSERT INTO auth_apikey (api_key, ips) VALUES (?, ?)
 ON DUPLICATE KEY UPDATE ips = VALUES(ips);
 --   있으면 UPDATE, 없으면 INSERT  =  'doc_as_upsert' => true
@@ -1272,7 +1272,7 @@ GET api_keys/_search
 ```
 
 **MySQL 대응**
-```sql (실예제)
+```sql (예제)
 SELECT *, (id = 1) AS score      -- should   : 만족하면 가점 (정렬용)
 FROM api_keys
 WHERE api_key = 'abc123'         -- must
@@ -1415,7 +1415,7 @@ ex)
 ```
 
 **MySQL 대응**
-```sql (실예제)
+```sql (예제)
 SELECT *,
        MATCH(name) AGAINST('아이폰') AS score   -- must  : 관련도 점수를 만드는 조건
 FROM products
@@ -1451,7 +1451,7 @@ $response = $this->client->search([
 ```
 
 **MySQL 대응**
-```sql (실예제)
+```sql (예제)
 SELECT * FROM auth_apikey ORDER BY id DESC;
 ```
 | ES | MySQL |
@@ -1476,7 +1476,7 @@ $exists = $this->client->exists([
 ```
 
 **MySQL 대응**
-```sql (실예제)
+```sql (예제)
 SELECT EXISTS (SELECT 1 FROM auth_apikey WHERE id = ?) AS found;      -- exists() API
 SELECT EXISTS (SELECT 1 FROM auth_apikey WHERE api_key = ? LIMIT 1);  -- 조건으로 존재 확인
 ```
@@ -1500,7 +1500,7 @@ SELECT EXISTS (SELECT 1 FROM auth_apikey WHERE api_key = ? LIMIT 1);  -- 조건�
 ```
 
 **MySQL 대응**
-```sql (실예제)
+```sql (예제)
 SELECT * FROM api_keys WHERE ips IS NOT NULL;   -- exists 쿼리
 SELECT * FROM api_keys WHERE ips IS     NULL;   -- must_not + exists
 ```
@@ -1627,7 +1627,7 @@ GET products/_search
 ```
 
 **MySQL 대응**
-```sql (실예제)
+```sql (예제)
 SELECT status AS `key`, COUNT(*) AS doc_count
 FROM products
 GROUP BY status;
@@ -1706,7 +1706,7 @@ foreach ($response['aggregations']['by_status']['buckets'] as $b) {
 ```
 
 **MySQL 대응**
-```sql (실예제)
+```sql (예제)
 SELECT SUM(price), AVG(price), MAX(price),
        COUNT(ip)          AS ip_count,   -- value_count
        COUNT(DISTINCT ip) AS uniq_ip     -- cardinality (ES 는 ⚠️ 근사치)
@@ -1762,7 +1762,7 @@ $uniq = $response['aggregations']['uniq_ip']['value'];   // 37
 ```
 
 **MySQL 대응**
-```sql (실예제)
+```sql (예제)
 SELECT status, COUNT(*) AS cnt
 FROM products
 GROUP BY status
@@ -1798,7 +1798,7 @@ LIMIT 20;                -- size: 20
 > `from` 은 **이상(포함)**, `to` 는 **미만(제외)** 입니다.
 
 **MySQL 대응**
-```sql (실예제)
+```sql (예제)
 -- range agg = CASE WHEN 으로 구간 만들기
 SELECT CASE WHEN price < 10000 THEN '~10000'
             WHEN price < 100000 THEN '10000~100000'
@@ -1828,7 +1828,7 @@ FROM products GROUP BY bucket ORDER BY bucket;
 ```
 
 **MySQL 대응**
-```sql (실예제)
+```sql (예제)
 SELECT DATE(created_at) AS day, COUNT(*) AS doc_count   -- 1M 이면 DATE_FORMAT(.., '%Y-%m')
 FROM products
 GROUP BY day ORDER BY day;
@@ -1858,7 +1858,7 @@ GROUP BY day ORDER BY day;
 ```
 
 **MySQL 대응 — 조건별 카운트**
-```sql (실예제)
+```sql (예제)
 SELECT SUM(price >= 1000000)   AS `고가`,
        SUM(status = 'SOLDOUT') AS `품절`
 FROM products;
@@ -1910,7 +1910,7 @@ GET products/_search
 ```
 
 **MySQL 대응 — 이 쿼리 하나로 전부 설명됩니다**
-```sql (실예제)
+```sql (예제)
 SELECT status,                                     -- terms (Bucket)
        COUNT(*)                  AS doc_count,
        AVG(price)                AS avg_price,     -- 버킷 안 Metric
@@ -1961,7 +1961,7 @@ foreach ($response['aggregations']['by_status']['buckets'] as $b) {
 ```
 
 **MySQL 대응**
-```sql (실예제)
+```sql (예제)
 SELECT api_key, COUNT(*) AS call_count
 FROM api_logs
 GROUP BY api_key
@@ -2062,7 +2062,7 @@ echo "고유 IP: {$agg['uniq_ip']['value']} / 총 등록: {$agg['ip_total']['val
 ```
 
 **MySQL 대응**
-```sql (실예제)
+```sql (예제)
 SELECT COUNT(DISTINCT ip) AS uniq_ip,  -- cardinality
        COUNT(*)           AS ip_total  -- value_count
 FROM api_keys;
@@ -2096,7 +2096,7 @@ FROM api_keys GROUP BY ip ORDER BY doc_count DESC LIMIT 10;
 ```
 
 **MySQL 대응**
-```sql (실예제)
+```sql (예제)
 SELECT ip, COUNT(*) AS cnt
 FROM api_keys
 GROUP BY ip
@@ -2124,7 +2124,7 @@ LIMIT 1000;                    -- terms 의 size
 }
 ```
 
-```sql (실예제)
+```sql (예제)
 -- MySQL 대응
 SELECT DATE(created_at) AS day, COUNT(*)
 FROM auth_apikey
