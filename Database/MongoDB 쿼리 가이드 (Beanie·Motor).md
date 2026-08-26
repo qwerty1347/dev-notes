@@ -313,6 +313,19 @@ async def get_users_in_ids(ids: list[str]) -> list[dict]:
 
 > 반대는 `NotIn` / `{"$nin": [...]}`.
 
+cf) 특정 seller 검색 시 지정된 blind seller 리스트에 포함되어 있지 않은 seller 검색 방법
+
+{
+    "seller": {
+        "$nin": ["A", "B", ...]
+    },
+    "$and": [
+        {
+            "seller": "C"
+        }
+    ]
+}
+
 ---
 
 ## #10 부분일치 / `User::where('name','like','%kim%')` → `$regex`
